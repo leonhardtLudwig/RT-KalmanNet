@@ -103,9 +103,17 @@ class RobustKalman():
                 raise SystemExit("'input_feat_mode' must be an integer value between 0 and 3")
 
             # Initialize NN con GRU
+            # self.nn = RT_KalmanNet_nn(
+            #     input_size_fcl = input_size_fcl,
+            #     gru_hidden_size = gru_hidden_size
+            # )
             self.nn = RT_KalmanNet_nn(
-                input_size_fcl = input_size_fcl,
-                gru_hidden_size = gru_hidden_size
+                input_size_fcl=input_size_fcl,
+                gru_hidden_size=gru_hidden_size,
+                c_floor=1e-4,
+                c_range=0.2,
+                gru_layers=1,
+                dropout=0.0
             )
         
     # Below one can choose to use either the closed form Jacobian or the numerical one from Pytorch
@@ -327,7 +335,7 @@ class RobustKalman():
             trace_term = torch.trace(Minv - I_n)
             sign, logabsdet = torch.linalg.slogdet(M)
             logdet_term = torch.where(sign > 0, logabsdet, torch.log(eps))
-            return trace_term - logdet_term - c_scalar
+            return trace_term + logdet_term - c_scalar
 
         # ====================================================================
         # 1) Robust root-finding ALWAYS in no_grad (numerical stability)
