@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 class RT_KalmanNet_nn(nn.Module):
     def __init__(
@@ -9,6 +10,7 @@ class RT_KalmanNet_nn(nn.Module):
         gru_hidden_size=64,
         c_floor=1e-4,
         c_range=0.2,
+        c_init = 1e-3,
         gru_layers=1,
         dropout=0.0
     ):
@@ -36,7 +38,9 @@ class RT_KalmanNet_nn(nn.Module):
         self.fcl_out = nn.Linear(gru_hidden_size, 1)
 
         nn.init.xavier_uniform_(self.fcl_out.weight)
-        nn.init.constant_(self.fcl_out.bias, 0.0)
+        p = min(max((float(c_init) - self.c_floor) / self.c_range, 1e-6), 1 - 1e-6)
+        nn.init.constant_(self.fcl_out.bias, math.log(p / (1 - p)))
+        #nn.init.constant_(self.fcl_out.bias, 0.0)
 
     def forward(self, x, h_t=None):
         z = self.enc(x)
