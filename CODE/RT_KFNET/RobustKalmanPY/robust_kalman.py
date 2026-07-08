@@ -193,11 +193,23 @@ class RobustKalman():
                 theta_hat = 0.5 * (low + high)
 
         # ====================================================================
-        # 2) Differentiable Newton refinement -- ALWAYS run now, regardless of
-        #    ambient no_grad() context, so the returned VALUE is identical in
-        #    train and eval. torch.enable_grad() locally re-enables autograd
-        #    even if the caller is inside torch.no_grad().
+        # 2) Differentiable Newton refinement -- only needed when a learned
+        #    c_t is involved (use_nn=True): that's the only case where a
+        #    gradient w.r.t. c is ever taken downstream. The plain REKF
+        #    baseline (use_nn=False, fixed scalar c) never backprops through
+        #    theta, so skip the extra autograd.grad() work and return the
+        #    bisection result directly -- restores REKF's original per-step
+        #    speed instead of paying for a refinement nothing will use.
         # ====================================================================
+        if not self.use_nn:
+            with torch.no_grad():
+                self._last_theta_residual = torch.abs(g_fn(theta_hat.detach(), c_val.detach()))
+            return theta_hat
+
+        # Runs only when use_nn=True: ALWAYS refine regardless of ambient
+        # no_grad() context, so the returned VALUE is identical in train and
+        # eval. torch.enable_grad() locally re-enables autograd even if the
+        # caller is inside torch.no_grad().
         grad_was_enabled = torch.is_grad_enabled()
         with torch.enable_grad():
             theta = theta_hat.detach().clone()
@@ -248,6 +260,7 @@ class RobustKalman():
 
         h_t = None
         x_seq = [x_prev]  # per costruire Xrekf senza in-place su buffer persistente
+        xn_seq = []  # filtered/posterior estimates Xn_i (use y_i), for fair comparison vs. KalmanNet's posterior
 
         for i in range(0, self.T):
             C_i = self.fnComputeJacobianH(x_prev)
@@ -259,6 +272,7 @@ class RobustKalman():
 
             hn = self.model.h(x_prev)
             Xn_i = x_prev + (L @ (self.y[:, i] - hn))
+            xn_seq.append(Xn_i)
 
             A_i = self.fnComputeJacobianF(Xn_i)
 
@@ -315,6 +329,10 @@ class RobustKalman():
             V_prev = V_i
 
         Xrekf_out = torch.stack(x_seq, dim=1)
+        # Filtered/posterior sequence x_{i|i} (uses y_i), shape [n, T] -- directly
+        # comparable to test_target with no truncation, unlike Xrekf_out (which is
+        # the one-step-ahead PREDICTED sequence and needs Xrekf_out[:, :-1]).
+        self.Xn_out = torch.stack(xn_seq, dim=1)
 
         # Persiste stato solo detached per la prossima chiamata
         self.Xrekf_prev = x_prev.detach()
