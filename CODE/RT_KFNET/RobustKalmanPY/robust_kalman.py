@@ -5,36 +5,6 @@ import time
 import torch.nn.functional as func
 from KNet.RT_KalmanNet_nn import RT_KalmanNet_nn
 
-# ==============================================================================
-# TODO LIST: INTEGRAZIONE RETE-FILTRO (TASK 1 - Setup per BPTT in Loop Chiuso)
-# ==============================================================================
-#
-# ✅ COSA FARE (Aggiungere/Modificare):
-# [ ] Aggiornare l'istanziazione nel costruttore (__init__): Modificare la
-#     chiamata a `RT_KalmanNet_nn` passando i nuovi parametri richiesti dalla
-#     GRU (es. `gru_hidden_size` invece di `hidden_layers`).
-# [ ] Inizializzare la memoria: Aggiungere `h_t = None` ESATTAMENTE PRIMA 
-#     dell'inizio del ciclo `for i in range(0, self.T):` nella funzione `fnREKF`.
-# [ ] Adattare le dimensioni dei tensori: Dentro il ciclo `for`, prima di passare 
-#     `input_features` alla rete, assicurati che abbia forma 3D (Batch, Seq, Feat).
-#     Usa `input_features = input_features.view(1, 1, -1)` o `.unsqueeze()`.
-# [ ] Aggiornare la chiamata alla Rete: Sostituire `self.c = self.nn(input_features)`
-#     con `self.c, h_t = self.nn(input_features, h_t)`.
-#
-# 🚫 COSA NON FARE (Lasciare intatto):
-# [ ] NON modificare la matematica del Filtro: Tutte le equazioni (P, V, A, C, L)
-#     e le Jacobiane sono corrette.
-# [ ] NON modificare il calcolo delle feature (f1, f2, f3, f4).
-# [ ] NON cercare di far girare l'intero vettore dei tempi in un colpo solo 
-#     nella rete. A causa del loop chiuso (l'input t+1 dipende dall'uscita t),
-#     devi per forza ciclare step-by-step aggiornando `h_t`.
-#
-# 🧠 NOTA CONCETTUALE:
-# Srotolando `h_t` all'interno del ciclo `for`, stai costruendo un grafo
-# computazionale continuo. Quando il ciclo finirà, PyTorch avrà tracciato
-# l'intera storia e potrai chiamare `loss.backward()` sull'intera traiettoria.
-# ==============================================================================
-
 #%%
 # NOTE! There is a combination of numpy and torch thus if changing something use Tensors!
 class RobustKalman():

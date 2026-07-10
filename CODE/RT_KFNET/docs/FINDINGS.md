@@ -9,6 +9,44 @@ newest first. For *what code changed* to produce these, see
 
 ---
 
+## Task 3 (LF_DATA) + training-objective (2026-07-10)
+
+**[GOOD]** The linear robust filter is validated **bit-for-bit against the
+professor's MATLAB** — it reproduces `VR/PR` (the data-independent covariance
+sequence) to ~1e-15. The correct process noise is `Q = B·Bᵀ` (what
+`robust_filter.m` uses), *not* the saved `Q` (`LFD.m` builds `B` with
+element-wise `sqrt`, so they differ).
+
+**[GOOD]** **Gate result**: on the least-favorable data, sweeping `c` over all
+1000 trajectories, BOTH state MSE and the output one-step-prediction error have
+a **clean minimum at the true `c=1`**.
+
+**[OBSERVATION — revises an earlier claim]** An earlier sweep looked *monotonic*
+in `c` (optimal at the grid edge), which briefly led to the wrong conclusion
+that state MSE is degenerate for `c` and that training must switch to Zorzi's
+output-error. That was an **artifact of three bugs** (saved `Q` instead of
+`B·Bᵀ`, `V0=1e-3` instead of `I`, off-by-one alignment). With the MATLAB-exact
+filter, plain **state MSE recovers `c`** — so the notebook training keeps the
+KalmanNet-faithful **posterior state-MSE** loss; the output-error is kept only
+as a diagnostic.
+
+**[GOOD]** **Task 3 works**: RT-KalmanNet (widened `c_range=2`) trained on the
+LFM data learns `c_t` from a 0.15 start up to the neighborhood of true `c=1`
+(per-epoch mean bounces 0.6–1.5, avg ≈1.2), far above the old 0.2 ceiling; test
+state-MSE (2.25) is competitive with REKF-best-`c` (~2.30). See
+`task3_c_recovery.png`.
+
+**[OBSERVATION]** `c_t` recovers the *neighborhood* of 1 but wanders — the
+MSE-vs-`c` landscape is **shallow near the optimum** (<0.2% MSE change for
+`c ∈ [0.7,1.3]`), so there is weak gradient pressure to pin `c` exactly at 1.
+Not a bug; a tighter fit needs lower LR / more steps / a sharper objective.
+
+**[OBSERVATION]** On the matched SNL full-info benchmark `c_t` correctly stays
+flat (no mismatch → nothing to adapt to) — the posterior-loss fix does not and
+should not change that. `c`-adaptation is a mismatched-data phenomenon.
+
+---
+
 ## Option B — Partial-Information experiment (2026-07-08)
 
 **Setup**: filters operate on a *mismatched* internal model

@@ -5,6 +5,33 @@ For *results and interpretation* of these changes, see [FINDINGS.md](FINDINGS.md
 
 ---
 
+## 2026-07-10 — Task 3 (LF_DATA) c-recovery + training-loss fix + filter validation
+
+**Files**: `task3_lf_data.py` (new), `task3_c_recovery.png` (new result plot),
+`main_Robust_KNet.ipynb` (Cells 24 & 45 training loss; Cell 29 sweep),
+`RobustKalmanPY/robust_kalman.py`.
+
+- **Task 3 pipeline (new, standalone)**: `task3_lf_data.py` loads the MATLAB
+  least-favorable data (`CODE/LF_DATA/data.mat` via `scipy.io.loadmat`), builds
+  the linear constant-velocity `SystemModel`, and reuses `RobustKalman`. A
+  self-contained linear robust filter reproduces MATLAB's saved `VR/PR`
+  (data-independent covariance sequence) to ~1e-15.
+  **Critical fix**: the filter must use `Q = B·Bᵀ` (as `robust_filter.m` does),
+  NOT the saved `Q` variable — `LFD.m` builds `B` via *element-wise* `sqrt(Q)`,
+  so `B·Bᵀ ≠ Q`. Also `V0 = I` and the `y_i ↔ xw[:,i]` alignment.
+- **Task 3 result**: trained RT-KalmanNet (GRU, widened `c_range=2.0`,
+  `c_init=0.15`) on the LFM data with the posterior state-MSE loss → learned
+  `c_t` climbs from 0.15 to hover around the true `c=1` (far above the old 0.2
+  ceiling); test MSE ≈ REKF-with-best-`c`. Plot: `task3_c_recovery.png`.
+- **`main_Robust_KNet.ipynb` Cells 24 & 45**: training + CV loss switched from
+  the one-step *predicted* estimate `Xrekf[:,:-1]` to the **posterior** `Xn_out`
+  (KalmanNet eq 10) — fixes the `m1x_0` boundary artifact. Added a tracked
+  **Zorzi eq-10 output-prediction-error** CV diagnostic (`CV(innov,Zorzi)`),
+  not optimized.
+- **`main_Robust_KNet.ipynb` Cell 29**: constant-`c` sweep extended to `c=2.0`.
+
+---
+
 ## 2026-07-08 — Option B: Partial-Information experiment (in progress)
 
 **Files**: `main_Robust_KNet.ipynb` (11 new cells, inserted after the

@@ -11,7 +11,7 @@ steps. Updated as decisions are made — this is the living document; see
 |---|---|---|
 | **1. BPTT training** | ✅ Done, verified | Closed-loop, full-trajectory gradient flow, proper mini-batch gradient accumulation (`n_batch` trajectories averaged, one `backward()`/`optimizer.step()` per epoch). No further work planned. |
 | **2. GRU replacement** | ✅ Done, verified | MLP encoder + GRU + linear head; correct hidden-state threading within a trajectory, correct reset at boundaries. No further work planned. |
-| **3. LF_DATA `c` comparison** (constant / slowly-varying) | ⏳ Not started | Blocked on: `c_range` widening + `fnComputeTheta` numerical hardening for `c` near LF_DATA's `≈1` scale (see below), plus a MATLAB `.mat` → Python data-loading bridge (doesn't exist yet). |
+| **3. LF_DATA `c` comparison** (constant / slowly-varying) | 🟡 Milestone 1 done | **Constant `c=1` recovered**: RT-KalmanNet learns `c_t → ~1` on the existing `data.mat` (filter validated vs MATLAB `VR/PR`; `Q=B·Bᵀ` fix; `c_range` widened to 2). Standalone `task3_lf_data.py` + `task3_c_recovery.png`. **Remaining**: fold into the notebook (thread `c_range` param), tighten `c_t` convergence, and the *multiple-constant-`c`* + *slowly-varying-`c`* scenarios (need regenerated LFM data — MATLAB or a numpy port; deferred). |
 | **4. EKF/REKF/KalmanNet/existing-robust-KNet/proposed comparison** | 🟡 Partially done | REKF, RT-KalmanNet (proposed), KalmanNet are wired up and compared fairly (predicted + filtered metrics) on the full-info SNL benchmark. **Missing**: plain EKF baseline (`Filters/EKF.py` is currently broken, needs a fix first) and "existing robust KalmanNet" as a baseline distinct from the proposed method. |
 
 ## Why `c_t` hasn't visibly separated RT-KalmanNet from REKF yet
