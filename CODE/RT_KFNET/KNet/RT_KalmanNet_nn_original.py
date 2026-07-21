@@ -17,7 +17,7 @@ import torch.nn as nn
 
 
 class RT_KalmanNet_nn(nn.Module):
-    def __init__(self, input_size_fcl,output_size_fcl, hidden_sizes, output_size_DNN):
+    def __init__(self, input_size_fcl, output_size_fcl, hidden_sizes, output_size_DNN):
         """
         Args:
             input_size (int): Numero di neuroni in ingresso al Fully Connected Layer.
