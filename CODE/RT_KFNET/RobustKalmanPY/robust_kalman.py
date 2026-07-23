@@ -1,19 +1,30 @@
 #%% Basic libraries for matrix manipulation and math functions
+#
+# v3: combines the two independent implementations of Task 1 (BPTT) + Task 2
+# (GRU), built against KNet.RT_KalmanNet_nn_v3 (see ../modifiche_per_task12.md).
+# Structure kept close to robust_kalman_original.py (same method names, same
+# per-step operation order, same A/C/G/th bookkeeping); the state-management
+# fix needed for multi-epoch BPTT uses local-variable-per-step + stack instead
+# of preallocated-buffer + clone (see docs/team comparison for the rationale:
+# the clone pattern is O(T^2) in time/memory because it copies the whole
+# buffer at every step, while list+stack is O(T)).
 
 import torch
 import time
+import contextlib
 import torch.nn.functional as func
 from KNet.RT_KalmanNet_nn import RT_KalmanNet_nn
 
 #%%
 # NOTE! There is a combination of numpy and torch thus if changing something use Tensors!
 class RobustKalman():
-    def __init__(self, SysModel, test_data, c : float = 1e-3, hard_coded: bool = False, use_nn: bool = False, input_feat_mode: int = 0, gru_hidden_size: int = 64, sl_model: int = 0, set_noise_matrices: bool = False, Q_mat = torch.eye(3), R_mat = torch.eye(3), c_init: float = None):
+    def __init__(self, SysModel, test_data, c : float = 1e-3, hard_coded: bool = False, use_nn: bool = False, input_feat_mode: int = 0, gru_hidden_size: int = 64, gru_layers: int = 1, dropout: float = 0.0, sl_model: int = 0, set_noise_matrices: bool = False, Q_mat = torch.eye(3), R_mat = torch.eye(3)):
+
         # Select whether to use the NN or regular REKF model
         self.use_nn = use_nn
-        
+
         # Import the model from the SysModel class
-        self.model = SysModel 
+        self.model = SysModel
         self.x0 = torch.transpose(SysModel.m1x_0, 0, 1)
         # Setting the noise covariance matrices
         if set_noise_matrices:
@@ -24,37 +35,31 @@ class RobustKalman():
             # In case we are using the same noise matrices which generated the data
             self.Q = SysModel.Q
             self.R = SysModel.R
-
-        # Characteristic scales used to rescale the NN's input features (§2.4)
-        self._obs_scale = torch.sqrt(torch.clamp(torch.diagonal(self.R), min=1e-6))
-        self._state_scale = torch.sqrt(torch.clamp(torch.diagonal(self.Q), min=1e-6))
-
-        self.T = SysModel.T 
+        self.T = SysModel.T
         self.y = test_data
         self.c = torch.tensor(c)
         self.hard_coded = hard_coded
         self.sl_model = sl_model
-        
+
         # Preallocation of memory for the computation
         self.n = torch.Tensor.numpy(self.Q).shape[0] #state dimension
         self.p = torch.Tensor.numpy(self.R).shape[0] #output dimension
-        
+
         if self.use_nn:
-            self.Xrekf = torch.zeros(self.n, self.T+1, requires_grad=True) 
+            self.Xrekf = torch.zeros(self.n, self.T+1, requires_grad=True)
         else:
             self.Xrekf = torch.zeros(self.n, self.T+1)
 
         self.Xn = torch.zeros(self.n, self.T)
-        self.V = torch.zeros(self.n, self.n, self.T+1) 
+        self.V = torch.zeros(self.n, self.n, self.T+1)
 
-        self.reset_state()  # sets Xrekf_prev, y_prev, Xn_prev, V_prev (was inlined here before)
+        self.reset_state()  # sets Xrekf_prev, y_prev, Xn_prev, V_prev
 
-        self.A = torch.zeros(self.n, self.n, self.T) 
-        self.C = torch.zeros(self.p, self.n, self.T) 
+        self.A = torch.zeros(self.n, self.n, self.T)
+        self.C = torch.zeros(self.p, self.n, self.T)
         self.G = torch.zeros(self.n, self.p, self.T)
         self.th = torch.zeros(self.T)
         self.theta_residual_array = torch.zeros(self.T)
-
 
         if self.use_nn:
             self.input_feat_mode = input_feat_mode
@@ -68,15 +73,12 @@ class RobustKalman():
             else:
                 raise SystemExit("'input_feat_mode' must be an integer value between 0 and 3")
 
-            resolved_c_init = float(c) if c_init is None else float(c_init)
+            # Initialize NN
             self.nn = RT_KalmanNet_nn(
                 input_size_fcl=input_size_fcl,
                 gru_hidden_size=gru_hidden_size,
-                c_floor=1e-4,
-                c_range=0.2,
-                c_init=resolved_c_init,
-                gru_layers=1,
-                dropout=0.0
+                gru_layers=gru_layers,
+                dropout=dropout,
             )
 
     def reset_state(self):
@@ -84,8 +86,8 @@ class RobustKalman():
         self.y_prev = torch.zeros(self.p, device=self.Xrekf_prev.device, dtype=self.Xrekf_prev.dtype)
         self.Xn_prev = torch.zeros(self.n, device=self.Xrekf_prev.device, dtype=self.Xrekf_prev.dtype)
         self.V_prev = (1e-3 * torch.eye(self.n, device=self.Xrekf_prev.device,
-                                         dtype=self.Xrekf_prev.dtype)).detach()       
-        
+                                         dtype=self.Xrekf_prev.dtype)).detach()
+
     # Below one can choose to use either the closed form Jacobian or the numerical one from Pytorch
     def fnComputeJacobianF(self, x_n_temp):
         if self.hard_coded:
@@ -93,123 +95,99 @@ class RobustKalman():
         else:
             f_jac = torch.autograd.functional.jacobian(self.model.f, x_n_temp)
         return f_jac
-    
+
     def fnComputeJacobianH(self, x_rekf_temp):
         if self.hard_coded:
             h_jac = torch.tensor([[2*self.model.a*self.model.b*(self.model.c + self.model.b*x_rekf_temp[0]), 0],[0, 2*self.model.a*self.model.b*(self.model.c + self.model.b*x_rekf_temp[1])]])
         else:
             h_jac = torch.autograd.functional.jacobian(self.model.h,x_rekf_temp)
-            
+
         return h_jac
-    
+
+    def fnGamma(self, P_pred, theta):
+        """gamma(P, theta) = tr[(I - theta*P)^-1 - I] + log det(I - theta*P), see [UAVF] eq. for theta_k."""
+        I = torch.eye(self.n)
+        M = I - theta * P_pred
+        return torch.trace(torch.linalg.solve(M, I) - I) + torch.log(torch.det(M))
+
     def fnComputeTheta(self, P_pred):
-        """
-        Implicit-layer style solve for theta_t from:
-            g(theta, c) = tr((I - theta P)^-1 - I) + logdet(I - theta P) - c = 0
-
-        Forward: Solve root with bisection in no_grad for numerical robustness.
-        Backward: Apply one differentiable Newton refinement around theta_hat.
-        """
-        eps = torch.tensor(1e-8, device=P_pred.device, dtype=P_pred.dtype)
-        one = torch.tensor(1.0, device=P_pred.device, dtype=P_pred.dtype)
-
-        # Symmetrize P for numerical stability
-        P = 0.5 * (P_pred + P_pred.transpose(0, 1))
-        I_n = torch.eye(self.n, device=P.device, dtype=P.dtype)
-
-        # c_t from GRU
-        if torch.is_tensor(self.c):
-            c_val = self.c.to(device=P.device, dtype=P.dtype)
-        else:
-            c_val = torch.tensor(self.c, device=P.device, dtype=P.dtype)
-
-        c_val = torch.clamp(c_val, min=eps)
-
-        # Spectral upper bound
-        eigvals = torch.linalg.eigvalsh(P)
-        r = torch.clamp(torch.max(torch.abs(eigvals)), min=eps)
-        theta_max = (one - 1e-5) / r
-        theta_hi = theta_max * (one - 1e-6)
-
-        def g_fn(theta_scalar, c_scalar):
-            M = I_n - theta_scalar * P
-            Minv = torch.linalg.solve(M, I_n)
-            trace_term = torch.trace(Minv - I_n)
-            sign, logabsdet = torch.linalg.slogdet(M)
-            logdet_term = torch.where(sign > 0, logabsdet, torch.log(eps))
-            return trace_term + logdet_term - c_scalar
-
-        # ====================================================================
-        # 1) Robust root-finding ALWAYS in no_grad (numerical stability)
-        #    -- unchanged from before --
-        # ====================================================================
+        # The root theta* of gamma(P, theta) = c is found by bisection. This search
+        # is an inherently non-differentiable, iterative procedure (the update at
+        # each step is chosen by an if-branch on a bisection residual, not by an
+        # arithmetic expression in c), so gradients w.r.t. self.c would NOT flow
+        # through it: torch.no_grad() makes this explicit and avoids building a
+        # graph for the (many) intermediate iterations.
         with torch.no_grad():
-            low = torch.zeros((), device=P.device, dtype=P.dtype)
-            high = theta_hi
+            value = torch.tensor([1.0])
+            t1 = torch.tensor([0.0])
+            e = torch.linalg.eig(P_pred)[0]
+            r = torch.max(torch.abs(e))
+            t2 = (1 - 1e-5) * (torch.pow(r, -1))
+            c_value = self.c.detach() if torch.is_tensor(self.c) else self.c
 
-            g_low = g_fn(low, c_val.detach())
-            g_high = g_fn(high, c_val.detach())
+            while torch.abs(value) >= 1e-5:
+                theta_star = 0.5 * (t1 + t2)
+                value = self.fnGamma(P_pred, theta_star) - c_value
+                if value > 0:
+                    t2 = theta_star
+                else:
+                    t1 = theta_star
 
-            if not (g_low <= 0 and g_high >= 0):
-                theta_hat = 0.5 * high
-            else:
-                for _ in range(50):
-                    mid = 0.5 * (low + high)
-                    g_mid = g_fn(mid, c_val.detach())
-                    if g_mid > 0:
-                        high = mid
-                    else:
-                        low = mid
-                theta_hat = 0.5 * (low + high)
+        with torch.no_grad():
+            self._last_theta_residual = torch.abs(self.fnGamma(P_pred, theta_star) - c_value)
 
-        # ====================================================================
-        # 2) Differentiable Newton refinement -- only needed when a learned
-        #    c_t is involved (use_nn=True): that's the only case where a
-        #    gradient w.r.t. c is ever taken downstream. The plain REKF
-        #    baseline (use_nn=False, fixed scalar c) never backprops through
-        #    theta, so skip the extra autograd.grad() work and return the
-        #    bisection result directly -- restores REKF's original per-step
-        #    speed instead of paying for a refinement nothing will use.
-        # ====================================================================
+        # theta_star is the numerically converged root, but it carries no gradient
+        # w.r.t. self.c (it was computed entirely under no_grad). The REKF baseline
+        # (use_nn=False, fixed scalar c) never backprops through theta, so skip the
+        # extra autograd.grad() work below and return the bisection result directly.
         if not self.use_nn:
-            with torch.no_grad():
-                self._last_theta_residual = torch.abs(g_fn(theta_hat.detach(), c_val.detach()))
-            return theta_hat
+            return theta_star
 
-        # Runs only when use_nn=True: ALWAYS refine regardless of ambient
-        # no_grad() context, so the returned VALUE is identical in train and
-        # eval. torch.enable_grad() locally re-enables autograd even if the
-        # caller is inside torch.no_grad().
-        grad_was_enabled = torch.is_grad_enabled()
+        # theta_star is the numerically converged root, but it carries no gradient
+        # w.r.t. self.c (it was computed entirely under no_grad). To let gradients
+        # flow from theta back to the NN weights (via self.c), we take a single
+        # differentiable implicit-function-theorem correction step around theta_star:
+        # since gamma(P, theta(c)) = c identically, d theta/d c = 1 / gamma'(P, theta).
+        # This reconstructs (to first order, i.e. exactly at convergence since
+        # gamma(P, theta_star) ~= c) the same numeric value while making theta a
+        # differentiable function of self.c. torch.enable_grad() makes this correction
+        # step work even when fnComputeTheta is itself called inside an outer
+        # torch.no_grad() block (eval mode in fnREKF), without forcing the caller to
+        # track gradients through the (expensive, non-differentiable-anyway) bisection.
         with torch.enable_grad():
-            theta = theta_hat.detach().clone()
-            theta.requires_grad_(True)
-            g_val = g_fn(theta, c_val)
+            theta_star = theta_star.detach().clone().requires_grad_(True)
+            gamma_at_star = self.fnGamma(P_pred, theta_star)
+            # gamma_grad = d gamma / d theta at theta_star is treated as a constant
+            # scaling factor (create_graph=False): we only need one derivative here,
+            # not a doubly-differentiable graph through the correction itself.
+            gamma_grad = torch.autograd.grad(gamma_at_star, theta_star, create_graph=False)[0]
 
-            dg_dtheta = torch.autograd.grad(
-                g_val, theta, create_graph=True, retain_graph=True
-            )[0]
+            c_for_grad = self.c if torch.is_tensor(self.c) else torch.tensor(float(self.c))
+            theta = theta_star.detach() + (c_for_grad - gamma_at_star.detach()) / gamma_grad
 
-            dg_abs = torch.abs(dg_dtheta)
-            dg_safe = torch.where(
-                dg_abs > 1e-10,
-                dg_dtheta,
-                torch.sign(dg_dtheta) * torch.tensor(1e-10, device=P.device, dtype=P.dtype)
-            )
+        return theta
 
-            theta_refined = theta - g_val / dg_safe
-            theta_refined = torch.clamp(theta_refined, min=torch.tensor(0.0, device=P.device, dtype=P.dtype), max=theta_hi)
-
-        # Diagnostic: residual |g(theta,c)| at the refined root (near 0 = solver converged)
-        with torch.no_grad():
-            self._last_theta_residual = torch.abs(g_fn(theta_refined.detach(), c_val.detach()))
-
-        # If the caller was in no_grad(), drop the small graph we just built
-        # (pure efficiency cleanup -- the numeric value is the same either way)
-        return theta_refined if grad_was_enabled else theta_refined.detach()
-
-
-    def fnREKF(self, train: bool = False, reset: bool = True):
+    # Computation of the REKF
+    def fnREKF(self, train: bool = False, reset: bool = True, bptt_truncation: int = None):
+        """
+        Args:
+            train (bool): if True, the NN (when use_nn) is set to train() mode and the
+                whole forward pass builds a computational graph so that BPTT can be
+                applied by the caller via loss.backward(). If False, the NN is set to
+                eval() mode and the forward pass runs under torch.no_grad() (no graph
+                is built at all).
+            reset (bool): if True (default), the filter's recursive state
+                (Xrekf_prev, Xn_prev, V_prev, y_prev) is reset to its initial value
+                before running. Set to False to continue from where the previous
+                call to fnREKF left off (e.g. for TBPTT across successive calls).
+            bptt_truncation (int, optional): if None (default), the graph is left
+                untouched across all T time steps -> full BPTT. If set to a positive
+                integer K, every K time steps the recurrent state of the NN (h_t) and
+                the filter's own recursive state (Xrekf_prev, Xn_prev, V_prev) are
+                detached from the graph, implementing truncated BPTT (TBPTT) as
+                discussed in [TSP] Sec. "Training Algorithm". Ignored when use_nn is
+                False.
+        """
         if reset:
             self.reset_state()
 
@@ -220,91 +198,148 @@ class RobustKalman():
                 self.nn.eval()
             self.c_array = []
 
-        start = time.time()
-
-        # Stato locale: evita riferimenti al grafo della chiamata precedente
+        # Local recursive state: starts detached from whatever graph the previous
+        # call to fnREKF (and the .backward() + optimizer.step() possibly run in
+        # between) left attached to self.Xrekf_prev/Xn_prev/V_prev/y_prev. Without
+        # this, a second call would keep referencing NN weights that the optimizer
+        # has since mutated in-place, raising a version-mismatch RuntimeError on
+        # backward.
         x_prev = self.Xrekf_prev.detach().clone()
         y_prev = self.y_prev.detach().clone()
         xn_prev = self.Xn_prev.detach().clone()
         V_prev = self.V_prev.detach().clone()
 
-        h_t = None
-        x_seq = [x_prev]  # per costruire Xrekf senza in-place su buffer persistente
-        xn_seq = []  # filtered/posterior estimates Xn_i (use y_i), for fair comparison vs. KalmanNet's posterior
+        # RT_KalmanNet_nn_v3 requires an explicit h_t (not optional): built here,
+        # at the start of the sequence, exactly where the filter's own state is
+        # reset above, so that "wiping the NN's memory" and "wiping the filter's
+        # memory" stay conceptually aligned.
+        h_t = self.nn.init_hidden(device=x_prev.device, dtype=x_prev.dtype) if self.use_nn else None
 
-        for i in range(0, self.T):
-            C_i = self.fnComputeJacobianH(x_prev)
+        x_seq = [x_prev]     # builds Xrekf without in-place writes on a persistent buffer
+        xn_seq = []          # filtered/posterior estimates Xn_i (use y_i)
+        A_seq = []
+        C_seq = []
+        G_seq = []
+        th_seq = []
+        theta_residual_seq = []
 
-            L = V_prev @ torch.transpose(C_i, 0, 1) @ torch.linalg.solve(
-                C_i @ V_prev @ torch.transpose(C_i, 0, 1) + self.R,
-                torch.eye(self.p, device=V_prev.device, dtype=V_prev.dtype),
-            )
+        start = time.time()
 
-            hn = self.model.h(x_prev)
-            Xn_i = x_prev + (L @ (self.y[:, i] - hn))
-            xn_seq.append(Xn_i)
+        # In eval mode (train=False) we never need gradients: wrap the whole loop in
+        # torch.no_grad() to avoid building a computational graph. In train mode (or
+        # when the NN is not used at all) we keep autograd enabled as usual.
+        no_grad_ctx = torch.no_grad() if (self.use_nn and not train) else contextlib.nullcontext()
 
-            A_i = self.fnComputeJacobianF(Xn_i)
+        with no_grad_ctx:
+            # Forward Step
+            for i in range(0, self.T):
 
-            x_next = torch.squeeze(self.model.f(Xn_i))
+                # C_t
+                C_i = self.fnComputeJacobianH(x_prev)
 
-            P = (
-                A_i @ V_prev @ torch.transpose(A_i, 0, 1)
-                - A_i @ V_prev @ torch.transpose(C_i, 0, 1)
-                @ torch.linalg.solve(
+                # L_t
+                L = V_prev @ torch.transpose(C_i, 0, 1) @ torch.linalg.solve(
                     C_i @ V_prev @ torch.transpose(C_i, 0, 1) + self.R,
-                    torch.eye(self.p, device=V_prev.device, dtype=V_prev.dtype),
-                )
-                @ C_i @ V_prev @ torch.transpose(A_i, 0, 1)
-                + self.Q
-            )
+                    torch.eye(self.p, device=V_prev.device, dtype=V_prev.dtype))
 
-            if self.use_nn:
-                f1 = (self.y[:, i] - y_prev) / self._obs_scale
-                f2 = (self.y[:, i] - hn) / self._obs_scale
-                f3 = (Xn_i - xn_prev) / self._state_scale
-                f4 = (Xn_i - x_prev) / self._state_scale
+                # h(\hat x_t)
+                hn = self.model.h(x_prev)
 
-                if self.input_feat_mode == 0:
-                    input_features = f2
-                elif self.input_feat_mode == 1:
-                    input_features = torch.cat([f1, f2, f4], dim=0)
-                elif self.input_feat_mode == 2:
-                    input_features = torch.cat([f1, f3, f4], dim=0)
-                else:
-                    input_features = torch.cat([f1, f2, f3, f4], dim=0)
+                # \hat x_t|t
+                Xn_i = x_prev + (L @ (self.y[:, i] - hn))
+                xn_seq.append(Xn_i)
 
-                input_features = input_features.view(1, 1, -1)
-                self.c, h_t = self.nn(input_features, h_t)
-                self.c = self.c.squeeze()
-                self.c_array.append(self.c)
+                # A_t
+                A_i = self.fnComputeJacobianF(Xn_i)
 
-            th_i = self.fnComputeTheta(P)
-            self.th[i] = th_i.detach()
-            self.theta_residual_array[i] = self._last_theta_residual
+                # G_t
+                G_i = A_i @ L
 
-            V_i = torch.linalg.solve(
-                torch.linalg.solve(
-                    P, torch.eye(self.n, device=P.device, dtype=P.dtype)
-                ) - th_i * torch.eye(self.n, device=P.device, dtype=P.dtype),
-                torch.eye(self.n, device=P.device, dtype=P.dtype),
-            )
+                # \hat x_t+1
+                x_next = torch.squeeze(self.model.f(Xn_i))
 
-            x_seq.append(x_next)
+                # P_t+1
+                P = (A_i @ V_prev @ torch.transpose(A_i, 0, 1)
+                     - A_i @ V_prev @ torch.transpose(C_i, 0, 1)
+                     @ torch.linalg.solve(
+                         C_i @ V_prev @ torch.transpose(C_i, 0, 1) + self.R,
+                         torch.eye(self.p, device=V_prev.device, dtype=V_prev.dtype))
+                     @ C_i @ V_prev @ torch.transpose(A_i, 0, 1)
+                     + self.Q)
 
-            # update stato locale
-            x_prev = x_next
-            xn_prev = Xn_i
-            y_prev = self.y[:, i]
-            V_prev = V_i
+                if self.use_nn:
+                    # Compute input features F1,F2,F3,F4 (no normalization: kept
+                    # identical to the professor's original feature definitions
+                    # until a controlled experiment shows rescaling helps).
+                    f1 = self.y[:, i] - y_prev
+                    f2 = self.y[:, i] - hn
+                    f3 = Xn_i - xn_prev
+                    f4 = Xn_i - x_prev
 
+                    # Stacking input features [F1, F2, F4]
+                    if self.input_feat_mode == 0:
+                        input_features = f2
+                    elif self.input_feat_mode == 1:
+                        input_features = torch.cat([f1, f2, f4], dim=0)
+                    elif self.input_feat_mode == 2:
+                        input_features = torch.cat([f1, f3, f4], dim=0)
+                    else:
+                        input_features = torch.cat([f1, f2, f3, f4], dim=0)
+
+                    # Forward Step
+                    self.c, h_t = self.nn(input_features, h_t)
+                    self.c_array.append(self.c)
+
+                # th_t
+                th_i = self.fnComputeTheta(P)
+
+                # V_t+1
+                V_i = torch.linalg.solve(
+                    torch.linalg.solve(P, torch.eye(self.n, device=P.device, dtype=P.dtype))
+                    - th_i * torch.eye(self.n, device=P.device, dtype=P.dtype),
+                    torch.eye(self.n, device=P.device, dtype=P.dtype))
+
+                x_seq.append(x_next)
+                A_seq.append(A_i.detach())
+                C_seq.append(C_i.detach())
+                G_seq.append(G_i.detach())
+                th_seq.append(th_i.detach())
+                theta_residual_seq.append(self._last_theta_residual)
+
+                # Update recursive state
+                x_prev = x_next
+                xn_prev = Xn_i
+                y_prev = self.y[:, i]
+                V_prev = V_i
+
+                # Truncated BPTT: cut the graph every bptt_truncation steps, both for
+                # the NN's own recurrent state and for the filter's recursive state.
+                # h_t is detached (not reset to zero) so the recurrence itself keeps
+                # running across the boundary -- only the gradient path is cut.
+                if self.use_nn and train and bptt_truncation is not None and (i + 1) % bptt_truncation == 0:
+                    h_t = h_t.detach()
+                    x_prev = x_prev.detach()
+                    xn_prev = xn_prev.detach()
+                    V_prev = V_prev.detach()
+
+        # Assemble outputs. Xrekf_out is the one-step-ahead PREDICTED sequence
+        # (needs Xrekf_out[:, :-1] to compare against test_target); Xn_out is the
+        # filtered/posterior sequence x_{i|i} (uses y_i), directly comparable to
+        # test_target with no truncation, like KalmanNet's posterior output.
         Xrekf_out = torch.stack(x_seq, dim=1)
-        # Filtered/posterior sequence x_{i|i} (uses y_i), shape [n, T] -- directly
-        # comparable to test_target with no truncation, unlike Xrekf_out (which is
-        # the one-step-ahead PREDICTED sequence and needs Xrekf_out[:, :-1]).
         self.Xn_out = torch.stack(xn_seq, dim=1)
+        self.A = torch.stack(A_seq, dim=-1)
+        self.C = torch.stack(C_seq, dim=-1)
+        self.G = torch.stack(G_seq, dim=-1)
+        self.th = torch.stack(th_seq)
+        self.theta_residual_array = torch.stack(theta_residual_seq)
+        # self.V is intentionally NOT kept as a stacked buffer here: V_i is a
+        # small per-step covariance only needed one step ahead (V_prev), so
+        # unlike A/C/G/th (diagnostics explicitly requested for inspection) it
+        # is not accumulated. Callers needing V_i for a specific i can recompute
+        # it from A/C/G/th if needed.
 
-        # Persiste stato solo detached per la prossima chiamata
+        # Persist state, detached, for the next call
         self.Xrekf_prev = x_prev.detach()
         self.Xn_prev = xn_prev.detach()
         self.y_prev = y_prev.detach()
