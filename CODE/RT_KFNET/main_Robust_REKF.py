@@ -126,9 +126,7 @@ plt.show()
 #%% ##################### FROM HERE WE TEST THE IMPLEMENTATION OF RT-KalmanNet #########################
 
 sys_model.m1x_0 = torch.zeros(m,1)
-#RT_KalmanNet = RobustKalman(sys_model, train_input,1e-3,True,True, input_feat_mode=3)
-RT_KalmanNet = RobustKalman(sys_model, train_input, 1e-3, True, True,
-                             input_feat_mode=3, hidden_size=32, fc_input_size=16)
+RT_KalmanNet = RobustKalman(sys_model, train_input,1e-3,True,True, input_feat_mode=3)
 model = RT_KalmanNet
 
 # Hyper-parameters

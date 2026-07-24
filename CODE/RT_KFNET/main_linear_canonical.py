@@ -71,7 +71,7 @@ print("1/r2 [dB]: ", 10 * torch.log10(1/r2[0]))
 print("1/q2 [dB]: ", 10 * torch.log10(1/q2[0]))
 
 ### training parameters ##################################################
-args.use_cuda = False # use GPU or not
+args.use_cuda = True # use GPU or not
 args.n_steps = 4000
 args.n_batch = 30
 args.lr = 1e-4
