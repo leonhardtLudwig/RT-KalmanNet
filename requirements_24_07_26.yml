@@ -1,0 +1,22 @@
+name: rt_kalman_net
+
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+
+  - numpy
+  - scipy
+  - matplotlib
+  - seaborn
+  - pandas
+
+  - pytorch
+
+  - pip
+
+  - pip:
+      - pyParticleEst==1.1.4
